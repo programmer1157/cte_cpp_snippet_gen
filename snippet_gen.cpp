@@ -104,16 +104,42 @@ static string tail_name(const string &qualified) {
     return qualified.substr(pos + 2);
 }
 
+// Normalize an include string into a "printable key" that retains angle/quote
+// semantics for printing and allows deduplication.
+// Input forms we accept here:
+//   - "<vector>"  (already bracketed)
+//   - "\"my.h\""  (already quoted)
+//   - "vector"    (plain token like earlier code used)
+// The returned key will be: "<vector>", "\"my.h\"" or "<vector>" for plain "vector".
+static string normalize_include_for_key(const string &raw) {
+    string s = trim(raw);
+    if (s.empty()) return s;
+    if (s.front() == '<' && s.back() == '>') return s;            // already <...>
+    if (s.front() == '"' && s.back() == '"') return s;            // already "..."
+    // otherwise assume a plain header name -> print with angle brackets
+    return string("<") + s + string(">");
+}
+
 static string make_program_from_body_lines(const vector<string> &body_lines,
                                           const vector<string> &extra_includes = {},
                                           const vector<string> &extra_top = {}) {
     std::ostringstream out;
+    // Always print iostream first
     out << "#include <iostream>\n";
-    // dedupe includes
+
+    // build set of unique include keys (like "<vector>" or "\"my.h\"")
     std::set<string> uniq;
-    for (auto &h : extra_includes) if (!h.empty()) uniq.insert(h);
-    for (auto &h : uniq) out << "#include <" << h << ">\n";
+    for (const auto &h : extra_includes) {
+        string key = normalize_include_for_key(h);
+        if (key.empty()) continue;
+        if (key == "<iostream>") continue; // iostream already emitted
+        uniq.insert(key);
+    }
+    for (const auto &h : uniq) {
+        out << "#include " << h << "\n";
+    }
     out << "\n";
+
     for (auto &t : extra_top) out << t << "\n";
     out << "\nusing namespace std;\n\n";
     out << "int main() {\n";
@@ -312,6 +338,10 @@ static void replace_all(string &s, const string &token, const string &repl) {
 }
 
 // Build parts from a user snippet, with parameter substitution applied.
+// NOTE: custom snippets must NOT contain an int main(. We also extract #include
+// lines from the snippet and place them into Parts.includes so they will be
+// emitted before main. The snippet body lines (without includes) are returned
+// in Parts.body.
 static Parts parts_from_user_snippet_with_params(const UserKeyword &uk, const map<string,string> &values, const string &tag) {
     // copy snippet and replace placeholders {name} with provided values
     string transformed = uk.snippet;
@@ -322,18 +352,42 @@ static Parts parts_from_user_snippet_with_params(const UserKeyword &uk, const ma
         // replace occurrences of "{" + pname + "}" with val
         replace_all(transformed, "{" + pname + "}", val);
     }
-    // Now place transformed into parts
-    Parts p;
+    // Enforce: custom snippets must not contain main()
     if (transformed.find("int main(") != string::npos) {
-        p.top.push_back("// (" + tag + ") User-defined full program:");
-        p.top.push_back(transformed);
-        p.body.push_back("// (" + tag + ") User program above; no extra main content inserted here.");
-    } else {
-        p.body.push_back("// (" + tag + ") User-defined snippet (with parameter substitution):");
-        std::istringstream iss(transformed);
-        string line;
-        while (std::getline(iss, line)) p.body.push_back(line);
+        // This should not happen because we prevent storing snippets with main,
+        // but be defensive: return a generic informative body emphasizing the issue.
+        Parts p;
+        p.body.push_back("// (" + tag + ") ERROR: user snippet contains 'int main('. This is disallowed for custom keywords.");
+        p.body.push_back("// Please redefine this custom keyword without a main() function.");
+        return p;
     }
+
+    Parts p;
+    // scan lines: extract #include lines (variants like "#include <...>" or "# include \"...\"" )
+    std::istringstream iss(transformed);
+    string line;
+    while (std::getline(iss, line)) {
+        string tline = trim(line);
+        // accept both "#include" and "# include"
+        if (tline.rfind("#include", 0) == 0) {
+            // remainder after "#include"
+            string rem = trim(tline.substr(8));
+            if (!rem.empty()) {
+                // store the remainder as the include token (like "<vector>" or "\"my.h\"" or "vector")
+                p.includes.push_back(rem);
+            }
+            continue; // do not add include lines to body
+        } else if (tline.rfind("# include", 0) == 0) {
+            string rem = trim(tline.substr(8));
+            if (!rem.empty()) p.includes.push_back(rem);
+            continue;
+        } else {
+            p.body.push_back(line);
+        }
+    }
+
+    // Add a small comment header to body to note parameter substitution
+    p.body.insert(p.body.begin(), "// (" + tag + ") User-defined snippet (with parameter substitution):");
     return p;
 }
 
