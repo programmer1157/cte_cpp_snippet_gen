@@ -142,7 +142,7 @@ static string make_program_from_body_lines(const vector<string> &body_lines,
 
     for (auto &t : extra_top) out << t << "\n";
     out << "\nusing namespace std;\n\n";
-    out << "int main() {\n";
+    out << "int main(int argc, char *argv[]) {\n";
     for (auto &line : body_lines) out << "    " << line << "\n";
     out << "    return 0;\n";
     out << "}\n";
