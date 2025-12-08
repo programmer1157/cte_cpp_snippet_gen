@@ -1247,17 +1247,129 @@ static Parts handle_goto(Context &ctx, const string &tag) {
 
 static Parts handle_break_continue(Context &ctx, const string &kw, const string &tag) {
     Parts p;
-    string count = ask("[" + tag + "] Loop iterations to demonstrate", "5");
-    p.body.push_back("// (" + tag + ") Demonstrate " + kw + " inside a loop");
-    p.body.push_back("for (int i = 0; i < " + count + "; ++i) {");
-    if (kw == "break") {
-        p.body.push_back("    if (i == 2) break;");
-        p.body.push_back("    cout << i << endl;");
-    } else {
-        p.body.push_back("    if (i == 2) { cout << \"continue at i=2\" << endl; continue; }");
-        p.body.push_back("    cout << i << endl;");
+
+    // Basic loop parameters
+    string loop_type = ask("[" + tag + "] Loop type to demonstrate (for / while / do-while)", "for");
+    string start = ask("[" + tag + "] Start index (integer)", "0");
+    string step  = ask("[" + tag + "] Step (increment, integer)", "1");
+    string iterations = ask("[" + tag + "] Number of iterations to demonstrate", "5");
+    string trigger = ask("[" + tag + "] Iteration index that triggers '" + kw + "' (integer)", "2");
+    string print_before = ask("[" + tag + "] Execute user body before the trigger check? (y/n)", "y");
+    string custom_msg = ask("[" + tag + "] Message to print when '" + kw + "' occurs (empty = default)", "");
+    if (custom_msg.empty()) custom_msg = (kw == "break") ? ("Breaking at i=" + trigger) : ("Continuing at i=" + trigger);
+
+    // Read user-supplied loop content (multiline). Signature: vector<string> read_multiline_body(const string &)
+    vector<string> user_lines = read_multiline_body("[" + tag + "] Enter loop body lines (use {i} for index); finish with a single '.' line");
+
+    // If user provided no lines, supply a sensible default
+    if (user_lines.empty()) user_lines.push_back("cout << i << endl;");
+
+    // Detect if user body already contains 'break' or 'continue' to avoid duplicate automatic insertion
+    bool user_has_control = false;
+    for (const auto &ln : user_lines) {
+        if (ln.find("break") != string::npos || ln.find("continue") != string::npos) {
+            user_has_control = true;
+            break;
+        }
     }
-    p.body.push_back("}");
+
+    // Helpers
+    auto replace_all = [](string s, const string &from, const string &to) {
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != string::npos) {
+            s.replace(pos, from.length(), to);
+            pos += to.length();
+        }
+        return s;
+    };
+
+    auto emit_user_body = [&](Parts &out) {
+        for (const auto &ln : user_lines) {
+            string replaced = replace_all(ln, "{i}", "i");
+            out.body.push_back("    " + replaced);
+        }
+    };
+
+    // Header
+    p.body.push_back("// (" + tag + ") Demonstrate '" + kw + "' inside a " + loop_type + " loop");
+
+    string end_expr = "(" + start + " + " + iterations + ")";
+    bool check_before = (!print_before.empty() && (print_before[0] == 'y' || print_before[0] == 'Y'));
+
+    // Emit loops; if user already included control, do not auto-insert trigger check
+    auto emit_trigger_stmt = [&](Parts &out) {
+        if (user_has_control) return; // user supplied their own break/continue
+        if (check_before) {
+            if (kw == "break") out.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; break; }");
+            else               out.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; continue; }");
+        } else {
+            // when printing after, trigger is emitted after user body — handled by callers
+        }
+    };
+
+    if (loop_type == "for" || loop_type == "For" || loop_type == "FOR") {
+        p.body.push_back("for (int i = " + start + "; i < " + end_expr + "; i += " + step + ") {");
+        if (check_before) {
+            emit_trigger_stmt(p);
+            emit_user_body(p);
+        } else {
+            emit_user_body(p);
+            if (!user_has_control) {
+                if (kw == "break") p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; break; }");
+                else               p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; continue; }");
+            }
+        }
+        p.body.push_back("}");
+    }
+    else if (loop_type == "while" || loop_type == "While" || loop_type == "WHILE") {
+        p.body.push_back("int i = " + start + ";");
+        p.body.push_back("while (i < " + end_expr + ") {");
+        if (check_before) {
+            emit_trigger_stmt(p);
+            emit_user_body(p);
+        } else {
+            emit_user_body(p);
+            if (!user_has_control) {
+                if (kw == "break") p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; break; }");
+                else               p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; i += " + step + "; continue; }");
+            }
+        }
+        p.body.push_back("    i += " + step + ";");
+        p.body.push_back("}");
+    }
+    else if (loop_type == "do-while" || loop_type == "Do-while" || loop_type == "DO-WHILE") {
+        p.body.push_back("int i = " + start + ";");
+        p.body.push_back("do {");
+        if (check_before) {
+            emit_trigger_stmt(p);
+            emit_user_body(p);
+        } else {
+            emit_user_body(p);
+            if (!user_has_control) {
+                if (kw == "break") p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; break; }");
+                else               p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; i += " + step + "; continue; }");
+            }
+        }
+        p.body.push_back("    i += " + step + ";");
+        p.body.push_back("} while (i < " + end_expr + ");");
+    }
+    else {
+        // fallback to simple for-loop
+        p.body.push_back("// Unrecognized loop type; falling back to for-loop demonstration");
+        p.body.push_back("for (int i = " + start + "; i < " + end_expr + "; ++i) {");
+        if (check_before) {
+            emit_trigger_stmt(p);
+            emit_user_body(p);
+        } else {
+            emit_user_body(p);
+            if (!user_has_control) {
+                if (kw == "break") p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; break; }");
+                else               p.body.push_back("    if (i == " + trigger + ") { cout << \"" + custom_msg + "\" << endl; continue; }");
+            }
+        }
+        p.body.push_back("}");
+    }
+
     return p;
 }
 
@@ -1569,6 +1681,8 @@ int main() {
     cout << "Commands:\n";
     cout << "  :add / :define         - define a new custom keyword with parameters\n";
     cout << "  :list                  - list stored custom keywords\n";
+    cout << "  :search <term>         - search stored custom keywords (name or snippet text)\n";
+    cout << "  :edit <keyword>        - interactively edit a stored custom keyword (params & snippet)\n";
     cout << "  :remove <keyword>      - remove a stored custom keyword\n";
     cout << "  :help                  - show help (includes C++ standard keywords)\n";
     cout << "Type 'exit' or send EOF to quit.\n\n";
@@ -1657,6 +1771,111 @@ int main() {
                     }
                 }
                 continue;
+                        } else if (cmd == ":search") {
+                // :search <term> — search by name or by substring in snippet text
+                string term;
+                // allow direct argument or prompt if missing
+                if (!(iss >> term)) {
+                    term = ask(":search term (substring search over name and snippet)", "");
+                }
+                if (term.empty()) {
+                    cout << "Empty search term; aborting search.\n";
+                } else {
+                    size_t found = 0;
+                    for (const auto &kv : user_keywords) {
+                        const string &name = kv.first;
+                        const UserKeyword &uk = kv.second;
+                        // build a small searchable string: name + params + snippet
+                        std::ostringstream probe;
+                        probe << name << " ";
+                        for (const auto &pp : uk.params) probe << pp.first << "=" << pp.second << " ";
+                        probe << " " << uk.snippet;
+                        string hay = probe.str();
+                        if (hay.find(term) != string::npos) {
+                            cout << "  - " << name;
+                            if (!uk.params.empty()) {
+                                cout << " (params: ";
+                                bool first = true;
+                                for (const auto &pp : uk.params) {
+                                    if (!first) cout << ", ";
+                                    cout << pp.first << "=" << pp.second;
+                                    first = false;
+                                }
+                                cout << ")";
+                            }
+                            cout << "\n";
+                            // show a short preview of the snippet (first non-empty line)
+                            {
+                                std::istringstream s(uk.snippet);
+                                string line;
+                                while (std::getline(s, line)) {
+                                    if (!line.empty()) { cout << "      snippet preview: " << line << "\n"; break; }
+                                }
+                            }
+                            ++found;
+                        }
+                    }
+                    if (found == 0) cout << "No custom keywords matched '" << term << "'.\n";
+                }
+                continue;
+            } else if (cmd == ":edit") {
+                // :edit <keyword> — interactive edit for params and snippet, preserve current format
+                string key; iss >> key;
+                if (key.empty()) {
+                    key = ask(":edit which custom keyword? (name)", "");
+                }
+                if (key.empty()) {
+                    cout << "No keyword supplied; aborting.\n";
+                    continue;
+                }
+                auto it = user_keywords.find(key);
+                if (it == user_keywords.end()) {
+                    cout << "No such custom keyword '" << key << "'.\n";
+                    continue;
+                }
+                UserKeyword uk = it->second; // copy for editing
+                cout << "Editing custom keyword '" << key << "'. Current parameters:";
+                if (uk.params.empty()) cout << " (none)";
+                cout << "\n";
+                // show current params and allow edit
+                for (size_t i = 0; i < uk.params.size(); ++i) {
+                    cout << "  " << (i+1) << ") " << uk.params[i].first << " = " << uk.params[i].second << "\n";
+                    string newval = ask("    New default for parameter '" + uk.params[i].first + "' (empty = keep)", "");
+                    if (!newval.empty()) uk.params[i].second = newval;
+                }
+                // ask to add new parameter
+                string addp = ask("Add a new parameter? (enter name or leave empty to skip)", "");
+                while (!addp.empty()) {
+                    string defv = ask("  Default value for '" + addp + "'", "");
+                    uk.params.emplace_back(addp, defv);
+                    addp = ask("Add another parameter? (enter name or leave empty to finish)", "");
+                }
+                // show current snippet and allow full replacement
+                cout << "Current snippet (lines):\n";
+                {
+                    std::istringstream s(uk.snippet);
+                    string line; int idx = 1;
+                    while (std::getline(s, line)) {
+                        cout << "  " << idx << ": " << line << "\n";
+                        ++idx;
+                    }
+                }
+                string replace_snip = ask("Replace snippet entirely? (y to replace / n to keep)", "n");
+                if (replace_snip == "y" || replace_snip == "Y") {
+                    cout << "Enter new snippet lines. Finish with a single '.' on its own line.\n";
+                    vector<string> new_lines = read_multiline_body("Enter new snippet lines, finish with '.'");
+                    std::ostringstream ss;
+                    for (const auto &ln : new_lines) ss << ln << "\n";
+                    uk.snippet = ss.str();
+                }
+                // write back and persist
+                user_keywords[key] = std::move(uk);
+                if (save_user_keywords(user_keywords)) {
+                    cout << "Custom keyword '" << key << "' updated and saved (" << user_keywords[key].params.size() << " parameter(s)).\n";
+                } else {
+                    cout << "Failed to save custom keywords to disk.\n";
+                }
+                continue;
             } else if (cmd == ":remove") {
                 string key; iss >> key;
                 if (key.empty()) { cout << "Usage: :remove <keyword>\n"; continue; }
@@ -1672,6 +1891,8 @@ int main() {
                 cout << "Commands:\n"
                      << "  :add / :define     - define a new custom keyword with parameters\n"
                      << "  :list              - list stored custom keywords\n"
+                     << "  :search <term>     - search stored custom keywords (name or snippet text)\n"
+                     << "  :edit <keyword>    - interactively edit a stored custom keyword (params & snippet)\n"
                      << "  :remove <keyword>  - remove a stored custom keyword\n"
                      << "  :help              - show this help (includes C++ standard keywords)\n\n";
                 // Show C++17 keywords (sorted)
