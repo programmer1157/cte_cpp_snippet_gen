@@ -16,7 +16,7 @@ Changes/additions from original provided source:
 Other behavior/features unchanged: sequence-aware detection of every keyword
 occurrence, follow-up prompts reference each occurrence, read_multiline_body(...)
 implemented, EOF during follow-ups aborts cleanly, commands :add/:define, :list,
-:remove, :help retained and extended.
+:delete, :help retained and extended.
 
 Compile: g++ -std=c++17 -O2 -Wall -Wextra -o snippet_gen snippet_gen_updated.cpp
 */
@@ -98,12 +98,6 @@ static vector<string> split_csv(const string &s) {
     string item;
     while (std::getline(iss, item, ',')) out.push_back(trim(item));
     return out;
-}
-
-static string tail_name(const string &qualified) {
-    auto pos = qualified.rfind("::");
-    if (pos == string::npos) return qualified;
-    return qualified.substr(pos + 2);
 }
 
 // Normalize an include string into a "printable key" that retains angle/quote
@@ -226,16 +220,6 @@ static void install_slow_output(unsigned int ms_per_char = 6) {
     g_slow_cerr = new SlowBuf(g_old_cerr, ms_per_char);
     std::cout.rdbuf(g_slow_cout);
     std::cerr.rdbuf(g_slow_cerr);
-}
-
-// optional: restore original buffers (call at exit if you want to be tidy)
-static void restore_output() {
-    if (g_old_cout) std::cout.rdbuf(g_old_cout);
-    if (g_old_cerr) std::cerr.rdbuf(g_old_cerr);
-    delete g_slow_cout;
-    delete g_slow_cerr;
-    g_slow_cout = g_slow_cerr = nullptr;
-    g_old_cout = g_old_cerr = nullptr;
 }
 
 // -------------------- C++17 keyword set (function-local static) --------------------
@@ -382,7 +366,96 @@ struct Context {
     string last_var;
     string last_type;
     map<string,string> meta;
+    std::vector<Parts> control_stack;
 };
+
+// trim a string (preserve original indentation elsewhere)
+static inline std::string trim_copy(const std::string &s) {
+    size_t l = 0;
+    while (l < s.size() && isspace((unsigned char)s[l])) ++l;
+    size_t r = s.size();
+    while (r > l && isspace((unsigned char)s[r-1])) --r;
+    return s.substr(l, r - l);
+}
+
+static bool parts_is_opening_block(const Parts &p) {
+    // Look for a control-header line anywhere in the Parts body (conservative window).
+    // We consider the common headers: for(), while(), if(), switch(), do {, case <val>:
+    for (const auto &ln : p.body) {
+        std::string t;
+        // trim leading whitespace for pattern checks
+        size_t pos = 0;
+        while (pos < ln.size() && isspace((unsigned char)ln[pos])) ++pos;
+        if (pos >= ln.size()) continue;
+        t = ln.substr(pos);
+        if (t.rfind("for (", 0) == 0 || t.rfind("while (", 0) == 0 ||
+            t.rfind("if (", 0) == 0 || t.rfind("switch (", 0) == 0 ||
+            t.rfind("do {", 0) == 0 || t.rfind("case ", 0) == 0) {
+            return true;
+        }
+        // generic: any non-empty line that ends with '{' is a candidate
+        if (!t.empty() && t.back() == '{') return true;
+    }
+    return false;
+}
+
+static void extract_block_header_and_inner(const Parts &p,
+                                           std::vector<std::string> &out_preceding,
+                                           std::string &out_header,
+                                           std::vector<std::string> &out_inner,
+                                           bool &had_closing) {
+    out_preceding.clear();
+    out_header.clear();
+    out_inner.clear();
+    had_closing = false;
+
+    // find index of the first header-like line
+    int header_idx = -1;
+    for (size_t i = 0; i < p.body.size(); ++i) {
+        const string &ln = p.body[i];
+        size_t pos = 0;
+        while (pos < ln.size() && isspace((unsigned char)ln[pos])) ++pos;
+        if (pos >= ln.size()) {
+            // empty line -> treat as preceding
+            out_preceding.push_back(ln);
+            continue;
+        }
+        string t = ln.substr(pos);
+        if (t.rfind("for (", 0) == 0 || t.rfind("while (", 0) == 0 ||
+            t.rfind("if (", 0) == 0 || t.rfind("switch (", 0) == 0 ||
+            t.rfind("do {", 0) == 0 || t.rfind("case ", 0) == 0 || (!t.empty() && t.back() == '{')) {
+            header_idx = static_cast<int>(i);
+            break;
+        } else {
+            out_preceding.push_back(ln);
+        }
+    }
+
+    if (header_idx == -1) {
+        // no header found: nothing special — treat entire body as "preceding"
+        return;
+    }
+
+    // header is at header_idx
+    out_header = p.body[header_idx];
+
+    // collect inner lines after header up to possibly a trailing single '}'
+    size_t j = header_idx + 1;
+    for (; j < p.body.size(); ++j) {
+        string t = p.body[j];
+        // check if final single '}' (trimmed) and it's the last line
+        size_t pos = 0;
+        while (pos < t.size() && isspace((unsigned char)t[pos])) ++pos;
+        size_t endpos = t.size();
+        while (endpos > pos && isspace((unsigned char)t[endpos-1])) --endpos;
+        string trimmed = (pos < endpos) ? t.substr(pos, endpos - pos) : string();
+        if (trimmed == "}" && j == p.body.size() - 1) {
+            had_closing = true;
+            break;
+        }
+        out_inner.push_back(p.body[j]);
+    }
+}
 
 static string declare_variable(Context &ctx, const string &type, const string &base_name, const string &init) {
     string name = base_name;
@@ -397,6 +470,139 @@ static void append_parts(Parts &acc, const Parts &p) {
     for (auto &inc : p.includes) acc.includes.push_back(inc);
     for (auto &t : p.top) acc.top.push_back(t);
     for (auto &b : p.body) acc.body.push_back(b);
+}
+
+static inline std::string trim_leading(const std::string &s) {
+    size_t i = 0;
+    while (i < s.size() && isspace((unsigned char)s[i])) ++i;
+    return s.substr(i);
+}
+
+static inline std::string leading_ws(const std::string &s) {
+    size_t i = 0;
+    while (i < s.size() && isspace((unsigned char)s[i])) ++i;
+    return s.substr(0, i);
+}
+
+// Replacement: append with interactive nesting support and multi-frame probing.
+// acc: accumulating Parts (top-level output buffer)
+// p: generated Parts for a single keyword handler
+// ctx: execution context (must have control_stack field)
+// kw: the keyword that produced 'p'
+static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, const std::string &kw) {
+    // 1) If there are open frames, ask from most-recent to older whether to insert there.
+    if (!ctx.control_stack.empty()) {
+        // iterate from most recent frame to oldest
+        for (int fi = static_cast<int>(ctx.control_stack.size()) - 1; fi >= 0; --fi) {
+            const Parts &frame = ctx.control_stack[fi];
+
+            // find a good preview string for the frame (first non-empty line)
+            std::string preview = "(open block)";
+            for (const auto &ln : frame.body) {
+                std::string t = trim_leading(ln);
+                if (!t.empty()) { preview = ln; break; }
+            }
+
+            // prompt the user about inserting into this frame
+            std::string q = "Insert snippet for '" + kw + "' inside open block (most recent first): " + preview + " ? (y/n)";
+            std::string resp = ask(q, "y");
+            if (!resp.empty() && (resp[0] == 'y' || resp[0] == 'Y')) {
+                // append includes/top globally (preserve original behaviour)
+                for (const auto &inc : p.includes) acc.includes.push_back(inc);
+                for (const auto &t : p.top) acc.top.push_back(t);
+
+                // compute indentation for insertion:
+                // prefer header indentation if available, otherwise derive from first line
+                std::string base_ws;
+                if (!frame.body.empty()) {
+                    // find header-like line index (first non-empty)
+                    size_t idx = 0;
+                    while (idx < frame.body.size() && trim_leading(frame.body[idx]).empty()) ++idx;
+                    if (idx < frame.body.size()) base_ws = leading_ws(frame.body[idx]);
+                }
+                // use 4 spaces additional indent for block body
+                std::string indent = base_ws + std::string(4, ' ');
+
+                // append p.body into the chosen frame, normalizing leading whitespace
+                for (const auto &ln : p.body) {
+                    std::string normalized = trim_leading(ln);
+                    // preserve empty lines as empty (no inserted indent)
+                    if (normalized.empty()) ctx.control_stack[fi].body.push_back("");
+                    else ctx.control_stack[fi].body.push_back(indent + normalized);
+                }
+
+                return; // inserted — done
+            }
+            // user declined this frame -> continue to next older frame
+        }
+        // user declined all frames; fall through to normal behaviour
+    }
+
+    // 2) No frame chosen (or no frames existed). Handle opening-block detection as before.
+    if (parts_is_opening_block(p)) {
+        std::vector<std::string> preceding;
+        std::string header;
+        std::vector<std::string> inner;
+        bool had_closing = false;
+        extract_block_header_and_inner(p, preceding, header, inner, had_closing);
+
+        // Emit includes/top and any preceding lines immediately to top-level
+        for (const auto &inc : p.includes) acc.includes.push_back(inc);
+        for (const auto &t : p.top) acc.top.push_back(t);
+        for (const auto &ln : preceding) acc.body.push_back(ln);
+
+        // Build frame (header + inner) to optionally keep open
+        Parts frame;
+        if (!header.empty()) frame.body.push_back(header);
+        for (const auto &ln : inner) frame.body.push_back(ln);
+
+        std::string keep = ask("Detected control block header for '" + kw + "'. Keep this block open for nested inserts? (y/n)", "y");
+        if (!keep.empty() && (keep[0] == 'y' || keep[0] == 'Y')) {
+            ctx.control_stack.push_back(std::move(frame));
+            return;
+        }
+
+        // Not keeping open: emit remainder as originally (header + inner + closing)
+        // If we already emitted preceding, emit the rest; otherwise emit full p.body
+        if (preceding.empty()) {
+            for (const auto &ln : p.body) acc.body.push_back(ln);
+        } else {
+            if (!header.empty()) acc.body.push_back(header);
+            for (const auto &ln : inner) acc.body.push_back(ln);
+            if (had_closing) acc.body.push_back("}");
+            else acc.body.push_back("}");
+        }
+        return;
+    }
+
+    // 3) Default: append normally to top-level
+    append_parts(acc, p);
+}
+
+// Emit all open control-stack frames into acc.body (in creation order) and clear the stack.
+static void flush_control_stack(Parts &acc, Context &ctx) {
+    if (ctx.control_stack.empty()) return;
+
+    // Emit frames in order they were opened so header/inner appear sequentially.
+    for (size_t fi = 0; fi < ctx.control_stack.size(); ++fi) {
+        Parts &frame = ctx.control_stack[fi];
+
+        // Append every line in the frame to top-level body
+        for (const auto &ln : frame.body) acc.body.push_back(ln);
+
+        // If the last meaningful line isn't a solitary '}', append a closing brace.
+        bool has_trailing = false;
+        for (int j = static_cast<int>(frame.body.size()) - 1; j >= 0; --j) {
+            const std::string &ln = frame.body[j];
+            std::string t = trim_copy(ln);
+            if (t.empty()) continue;
+            if (t == "}") has_trailing = true;
+            break;
+        }
+        if (!has_trailing) acc.body.push_back("}");
+    }
+
+    ctx.control_stack.clear();
 }
 
 // Replace all occurrences of token in s with repl.
@@ -1066,13 +1272,56 @@ static Parts handle_alternative_tokens(Context &ctx, const string &kw, const str
         return std::pair<string,string>(type,name);
     };
 
-    // boolean alternative tokens (leave unchanged)
+    // utility: make a safe result variable name from components
+    auto make_res_name = [&](const string &a, const string &b, const string &suffix) {
+        return a + "_" + b + "_" + suffix;
+    };
+    auto make_res_name_unary = [&](const string &a, const string &suffix) {
+        return a + "_" + suffix;
+    };
+
+    // boolean alternative tokens: and / or / not
     if (kw == "and" || kw == "or" || kw == "not") {
-        string expr = ask("[" + tag + "] Boolean expression", "x > 0 and y > 0");
-        p.body.push_back("// (" + tag + ") Demonstrate 'and'/'or'/'not'");
-        p.body.push_back("int x = 1, y = 2;");
-        p.body.push_back(std::string("if (") + expr + ") cout << \"true\" << endl; else cout << \"false\" << endl;");
-        return p;
+        // For logical demonstrations we use bool variables for operands.
+        if (kw == "not") {
+            string name = ask("[" + tag + "] Variable name", "x");
+            string val  = ask("[" + tag + "] Initial boolean value (true/false)", "true");
+
+            // define operand
+            p.body.push_back("// (" + tag + ") Demonstrate 'not' (logical negation) with a variable");
+            p.body.push_back("bool " + name + " = " + val + ";");
+            // compute result into a variable
+            string res = make_res_name_unary(name, "not_res");
+            p.body.push_back("bool " + res + " = (not " + name + ");");
+            p.body.push_back("cout << \"" + res + " = \" << (" + res + " ? \"true\" : \"false\") << endl;");
+            // update context
+            ctx.vars[name] = "bool";
+            ctx.vars[res] = "bool";
+            ctx.last_var = res;
+            return p;
+        } else {
+            // and / or: two boolean operands
+            string a_name = ask("[" + tag + "] Left operand name", "x");
+            string a_val  = ask("[" + tag + "] Left operand initial boolean (true/false)", "true");
+            string b_name = ask("[" + tag + "] Right operand name", "y");
+            string b_val  = ask("[" + tag + "] Right operand initial boolean (true/false)", "false");
+
+            p.body.push_back("// (" + tag + ") Demonstrate '" + kw + "' (logical) using two bool variables");
+            p.body.push_back("bool " + a_name + " = " + a_val + ";");
+            p.body.push_back("bool " + b_name + " = " + b_val + ";");
+
+            // compute into a result variable
+            string res = make_res_name(a_name, b_name, "logic_res");
+            string op = (kw == "and") ? "and" : "or";
+            p.body.push_back("bool " + res + " = (" + a_name + " " + op + " " + b_name + ");");
+            p.body.push_back("cout << \"" + res + " = \" << (" + res + " ? \"true\" : \"false\") << endl;");
+            // update context
+            ctx.vars[a_name] = "bool";
+            ctx.vars[b_name] = "bool";
+            ctx.vars[res] = "bool";
+            ctx.last_var = res;
+            return p;
+        }
     }
 
     // bitwise binaries: xor, bitand, bitor
@@ -1087,18 +1336,25 @@ static Parts handle_alternative_tokens(Context &ctx, const string &kw, const str
         string a_val = ask("[" + tag + "] Left operand initial value", "5");
         string b_val = ask("[" + tag + "] Right operand initial value", "3");
 
-        ctx.vars[a_name] = a_type;
-        ctx.last_var = a_name;
-
-        string sym = (kw=="xor" ? "^" : (kw=="bitand" ? "&" : "|"));
-
+        // ensure variables exist
         p.body.push_back("// (" + tag + ") Demonstrate alternative token '" + kw + "'");
         p.body.push_back(a_type + " " + a_name + " = " + a_val + ";");
         p.body.push_back(b_type + " " + b_name + " = " + b_val + ";");
-        p.body.push_back(std::string("cout << \"") + a_name + " " + kw + " " + b_name +
-                         " = \" << (" + a_name + " " + kw + " " + b_name + ") << endl;");
-        p.body.push_back(std::string("cout << \"") + a_name + " " + sym + " " + b_name +
-                         " (symbol) = \" << (" + a_name + " " + sym + " " + b_name + ") << endl;");
+
+        // compute result into a named variable and print both the alternative-token expression and the symbolic expression
+        string res = make_res_name(a_name, b_name, "res");
+        // result type is same as operands
+        p.body.push_back(a_type + " " + res + " = (" + a_name + " " + (kw == "xor" ? "^" : (kw=="bitand" ? "&" : "|")) + " " + b_name + ");");
+
+        // print: first the alternative token form, then symbolic form (both refer to the computed result)
+        p.body.push_back("cout << \"" + a_name + " " + kw + " " + b_name + " = \" << " + res + " << endl;");
+        p.body.push_back("cout << \"" + a_name + " " + (kw=="xor" ? "^" : (kw=="bitand" ? "&" : "|")) + " " + b_name +
+                         " (symbol) = \" << " + res + " << endl;");
+
+        ctx.vars[a_name] = a_type;
+        ctx.vars[b_name] = b_type;
+        ctx.vars[res] = a_type;
+        ctx.last_var = res;
         return p;
     }
 
@@ -1108,31 +1364,39 @@ static Parts handle_alternative_tokens(Context &ctx, const string &kw, const str
         string t = V.first, v = V.second;
         string val = ask("[" + tag + "] Initial value", "42");
 
-        ctx.vars[v] = t;
-        ctx.last_var = v;
-
-        p.body.push_back("// (" + tag + ") Demonstrate 'compl'");
+        p.body.push_back("// (" + tag + ") Demonstrate 'compl' and '~' with a variable");
         p.body.push_back(t + " " + v + " = " + val + ";");
-        p.body.push_back(std::string("cout << \"compl " + v + " = \" << (compl " + v + ") << endl;"));
-        p.body.push_back(std::string("cout << \"~" + v + " = \" << (~" + v + ") << endl;"));
+
+        // compute complemented result into named variable
+        string inv = make_res_name_unary(v, "compl_res");
+        p.body.push_back(t + " " + inv + " = (compl " + v + ");");
+        p.body.push_back("cout << \"" + inv + " (compl " + v + ") = \" << " + inv + " << endl;");
+        // show symbolic ~ form too but using same computed value
+        p.body.push_back("cout << \"~" + v + " = \" << " + inv + " << endl;");
+
+        ctx.vars[v] = t;
+        ctx.vars[inv] = t;
+        ctx.last_var = inv;
         return p;
     }
 
-    // not_eq: inequality
+    // not_eq: inequality (alternative token for '!=')
     if (kw == "not_eq") {
         auto L = ask_integral("Left operand", "x", "int");
         string t = L.first, left = L.second;
 
-        string right = ask("[" + tag + "] Right operand/value", "0");
-
+        string right_val = ask("[" + tag + "] Right operand/value", "0");
+        // ensure left variable exists
+        p.body.push_back("// (" + tag + ") Demonstrate 'not_eq' (inequality) with a computed bool result");
         p.body.push_back(t + " " + left + " = 1; // example");
-        ctx.vars[left] = t;
-        ctx.last_var = left;
+        // compute comparison result into a bool variable
+        string cmp = make_res_name_unary(left, "not_eq_res");
+        p.body.push_back("bool " + cmp + " = (" + left + " not_eq " + right_val + ");");
+        p.body.push_back("cout << \"" + cmp + " ( " + left + " not_eq " + right_val + ") = \" << (" + cmp + " ? \"true\" : \"false\") << endl;");
 
-        p.body.push_back("// (" + tag + ") Demonstrate 'not_eq'");
-        p.body.push_back(std::string("cout << \"") + left + " not_eq " + right +
-                         " => \" << ((" + left + " not_eq " + right +
-                         ") ? \"true\" : \"false\") << endl;");
+        ctx.vars[left] = t;
+        ctx.vars[cmp] = "bool";
+        ctx.last_var = cmp;
         return p;
     }
 
@@ -1144,17 +1408,35 @@ static Parts handle_alternative_tokens(Context &ctx, const string &kw, const str
         string val = ask("[" + tag + "] Initial value", "15");
         string rhs = ask("[" + tag + "] RHS value", "6");
 
-        ctx.vars[v] = t;
-        ctx.last_var = v;
+        p.body.push_back("// (" + tag + ") Demonstrate '" + kw + "' with before/after variables");
+        // create explicit before variable so every value has a variable
+        string before = make_res_name_unary(v, "before");
+        p.body.push_back(t + " " + before + " = " + val + ";");
+        p.body.push_back(t + " " + v + " = " + before + ";");
+        // compute RHS into its own variable
+        string rhs_name = make_res_name_unary(v, "rhs");
+        p.body.push_back(t + " " + rhs_name + " = " + rhs + ";");
 
+        // print before
+        p.body.push_back("cout << \"before: " + before + " = \" << " + before + " << endl;");
+
+        // perform the compound operation on v (which was initialized from before)
         string sym = (kw=="and_eq") ? "&=" : (kw=="or_eq" ? "|=" : "^=");
+        p.body.push_back(v + " " + kw + " " + rhs_name + ";");
 
-        p.body.push_back("// (" + tag + ") Demonstrate '" + kw + "'");
-        p.body.push_back(t + " " + v + " = " + val + ";");
-        p.body.push_back(std::string("cout << \"before: " + v + " = \" << ") + v + " << endl;");
-        p.body.push_back(v + " " + kw + " " + rhs + ";");
-        p.body.push_back(std::string("cout << \"after (" + v + " " + sym + " " + rhs +
-                         "): \" << ") + v + " << endl;");
+        // assign after to an explicit after variable
+        string after = make_res_name_unary(v, "after");
+        p.body.push_back(t + " " + after + " = " + v + ";");
+
+        // print after using the after variable
+        p.body.push_back(std::string("cout << \"after (" + v + " " + sym + " " + rhs_name + "): \" << ") + after + " << endl;");
+
+        // update context
+        ctx.vars[before] = t;
+        ctx.vars[v] = t;
+        ctx.vars[rhs_name] = t;
+        ctx.vars[after] = t;
+        ctx.last_var = after;
         return p;
     }
 
@@ -1682,8 +1964,8 @@ int main() {
     cout << "  :add / :define         - define a new custom keyword with parameters\n";
     cout << "  :list                  - list stored custom keywords\n";
     cout << "  :search <term>         - search stored custom keywords (name or snippet text)\n";
-    cout << "  :edit <keyword>        - interactively edit a stored custom keyword (params & snippet)\n";
-    cout << "  :remove <keyword>      - remove a stored custom keyword\n";
+    cout << "  :update <keyword>      - interactively update a stored custom keyword (params & snippet)\n";
+    cout << "  :delete <keyword>      - delete a stored custom keyword\n";
     cout << "  :help                  - show help (includes C++ standard keywords)\n";
     cout << "Type 'exit' or send EOF to quit.\n\n";
 
@@ -1818,11 +2100,11 @@ int main() {
                     if (found == 0) cout << "No custom keywords matched '" << term << "'.\n";
                 }
                 continue;
-            } else if (cmd == ":edit") {
-                // :edit <keyword> — interactive edit for params and snippet, preserve current format
+            } else if (cmd == ":update") {
+                // :update <keyword> — interactive update for params and snippet, preserve current format
                 string key; iss >> key;
                 if (key.empty()) {
-                    key = ask(":edit which custom keyword? (name)", "");
+                    key = ask(":update which custom keyword? (name)", "");
                 }
                 if (key.empty()) {
                     cout << "No keyword supplied; aborting.\n";
@@ -1833,11 +2115,11 @@ int main() {
                     cout << "No such custom keyword '" << key << "'.\n";
                     continue;
                 }
-                UserKeyword uk = it->second; // copy for editing
-                cout << "Editing custom keyword '" << key << "'. Current parameters:";
+                UserKeyword uk = it->second; // copy for updateing
+                cout << "updateing custom keyword '" << key << "'. Current parameters:";
                 if (uk.params.empty()) cout << " (none)";
                 cout << "\n";
-                // show current params and allow edit
+                // show current params and allow update
                 for (size_t i = 0; i < uk.params.size(); ++i) {
                     cout << "  " << (i+1) << ") " << uk.params[i].first << " = " << uk.params[i].second << "\n";
                     string newval = ask("    New default for parameter '" + uk.params[i].first + "' (empty = keep)", "");
@@ -1876,13 +2158,13 @@ int main() {
                     cout << "Failed to save custom keywords to disk.\n";
                 }
                 continue;
-            } else if (cmd == ":remove") {
+            } else if (cmd == ":delete") {
                 string key; iss >> key;
-                if (key.empty()) { cout << "Usage: :remove <keyword>\n"; continue; }
+                if (key.empty()) { cout << "Usage: :delete <keyword>\n"; continue; }
                 key = normalize_token(key);
                 if (user_keywords.erase(key)) {
-                    if (save_user_keywords(user_keywords)) cout << "Removed '" << key << "' and saved changes.\n";
-                    else cout << "Removed '" << key << "' but failed to save to disk.\n";
+                    if (save_user_keywords(user_keywords)) cout << "deleted '" << key << "' and saved changes.\n";
+                    else cout << "deleted '" << key << "' but failed to save to disk.\n";
                 } else {
                     cout << "No such custom keyword: '" << key << "'.\n";
                 }
@@ -1892,8 +2174,8 @@ int main() {
                      << "  :add / :define     - define a new custom keyword with parameters\n"
                      << "  :list              - list stored custom keywords\n"
                      << "  :search <term>     - search stored custom keywords (name or snippet text)\n"
-                     << "  :edit <keyword>    - interactively edit a stored custom keyword (params & snippet)\n"
-                     << "  :remove <keyword>  - remove a stored custom keyword\n"
+                     << "  :update <keyword>  - interactively update a stored custom keyword (params & snippet)\n"
+                     << "  :delete <keyword>  - delete a stored custom keyword\n"
                      << "  :help              - show this help (includes C++ standard keywords)\n\n";
                 // Show C++17 keywords (sorted)
                 vector<string> ks;
@@ -2008,7 +2290,7 @@ int main() {
                 int occ_index = static_cast<int>(i + 1);
                 cout << "--- Asking about keyword occurrence " << occ_index << ": '" << kw << "' (token " << token_pos << ") ---\n";
                 Parts p = generate_parts_for_keyword_occurrence(kw, ctx, occ_index, token_pos, user_keywords);
-                append_parts(aggregated, p);
+                append_parts_with_nesting(aggregated, p, ctx, kw);
                 cout << "\n";
             }
         } catch (const EOFExit&) {
@@ -2017,6 +2299,12 @@ int main() {
         } catch (const std::exception &ex) {
             cerr << "Error during prompts: " << ex.what() << "\n";
             return 1;
+        }
+
+         // --- NEW: flush any remaining open control blocks so they appear in the final output ---
+        if (!ctx.control_stack.empty()) {
+            cout << "Flushing " << ctx.control_stack.size() << " open control block(s) to output.\n";
+            flush_control_stack(aggregated, ctx);
         }
 
         // assemble final program
