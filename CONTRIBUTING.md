@@ -60,6 +60,63 @@ Depending on how large the project is, you may want to outsource the questioning
 
 ## I Want To Contribute
 
+### Contributing via Pull Requests
+
+We use GitHub Pull Requests (PRs) as the primary mechanism for contributing code, documentation, and improvements.
+
+<!-- omit in toc -->
+#### Before Opening a Pull Request
+
+- Ensure you are working against the **latest `main` branch**.
+- Check existing [Issues](https://github.com/calebnwokocha/cte_cpp_snippet_gen/issues) and Pull Requests to avoid duplicate work.
+- For non-trivial changes, it is recommended to **open an issue first** to discuss the proposal with maintainers.
+- Make sure your contribution aligns with the scope and goals of the project.
+
+<!-- omit in toc -->
+#### How to Submit a Pull Request
+
+1. **Fork** the repository.
+2. **Create a new branch** from `main` with a clear, descriptive name:
+   - `fix/keyword-parser-bug`
+   - `feature/user-keyword-validation`
+   - `docs/readme-update`
+3. Make your changes:
+   - Follow the existing coding style and conventions.
+   - Keep changes focused and minimal.
+   - Add comments where the logic is non-obvious.
+4. **Test your changes** locally:
+   - Ensure the project builds successfully.
+   - Verify that existing functionality is not broken.
+5. **Commit your changes** with clear, descriptive commit messages.
+6. **Push** your branch to your fork.
+7. Open a **Pull Request** against the `main` branch of this repository.
+
+<!-- omit in toc -->
+#### Pull Request Requirements
+
+Your Pull Request should:
+
+- Clearly describe **what problem it solves** or **what improvement it introduces**.
+- Reference relevant issues using GitHub keywords (e.g. `Fixes #42`).
+- Include before/after behavior where applicable.
+- Update documentation if the change affects user-facing behavior.
+- Contain no unrelated or unnecessary changes.
+
+<!-- omit in toc -->
+#### Review Process
+
+- A maintainer will review your Pull Request.
+- You may be asked to make revisions or clarify design decisions.
+- Once approved, a maintainer will merge the Pull Request.
+- Please be responsive to feedback to keep the review process efficient.
+
+<!-- omit in toc -->
+#### After Your Pull Request Is Merged
+
+- Your contribution will become part of the project history.
+- You will be credited through GitHub’s contribution tracking.
+- Thank you for helping improve **cte_cpp_snippet_gen**.
+
 > ### Legal Notice <!-- omit in toc -->
 > When contributing to this project, you must agree that you have authored 100% of the content, that you have the necessary rights to the content and that the content you contribute may be provided under the project licence.
 
