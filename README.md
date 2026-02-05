@@ -53,7 +53,7 @@ If you prefer to edit `user_keywords.db` directly:
 4. Use simple ASCII characters for the delimiters `===KEYWORD:`, `===PARAMS:`, `===END===`.
 5. After manual edits, run the program. It will read the file at startup; if the file is malformed some entries may be ignored.
 
-## Examples
+## Example
 
 Example entry with two parameters:
 
