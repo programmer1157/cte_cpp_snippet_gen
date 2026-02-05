@@ -61,6 +61,7 @@ Example entry with two parameters:
 ===KEYWORD:swap===
 ===PARAMS:var1=x,var2=y===
 #include <iostream>
+#include <utility>
 std::swap({var1},{var2});
 std::cout << "{var1} = " << {var1} << ", {var2} = " << {var2} << std::endl;
 ===END===
