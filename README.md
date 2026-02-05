@@ -1,4 +1,4 @@
-# snippet_gen.cpp — managing `user_keywords.db`
+# Managing `user_keywords.db`
 
 This README explains how `snippet_gen.cpp` persists, loads and manages user-defined keywords stored in `user_keywords.db` (a plain text file). The program stores custom keywords as named snippets with optional parameters; use the program's interactive commands to add/update/delete entries, or edit the file by hand if you understand the format.
 
