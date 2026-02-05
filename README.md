@@ -58,7 +58,7 @@ If you prefer to edit `user_keywords.db` directly:
 Example entry with two parameters:
 
 ```
-===KEYWORD:swapprint===
+===KEYWORD:swap===
 ===PARAMS:var1=x,var2=y===
 #include <iostream>
 std::swap({var1},{var2});
