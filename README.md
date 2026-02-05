@@ -73,8 +73,3 @@ When expanded the placeholders `{var1}` and `{var2}` are replaced with supplied 
 
 - Always back up `user_keywords.db` before manual edits or bulk changes.
 - Prefer the interactive commands (`:add`, `:update`, `:delete`) to avoid formatting errors.
-
----
-
-If you want, I can also produce a small example `user_keywords.db` with a couple of sample entries.
-
