@@ -146,18 +146,19 @@ static string make_program_from_body_lines(const vector<string> &body_lines,
     return out.str();
 }
 
-// read_multiline_body implementation: reads lines until a single '.' line.
-// Returns collected lines (excluding the '.') and throws EOFExit on EOF.
-static vector<string> read_multiline_body(const string &instruction = "Enter lines, finish with a single '.' on its own line:") {
-    cout << instruction << endl;
-    vector<string> lines;
+// read_multiline_body implementation: reads lines until a single 'QED' line.
+// Returns collected lines (excluding the 'QED') and throws EOFExit on EOF.
+static std::vector<std::string> read_multiline_body(const std::string &instruction =
+    "Enter lines, finish with a single 'QED' on its own line:") {
+    std::cout << instruction << std::endl;
+    std::vector<std::string> lines;
     lines.reserve(16);
-    string line;
+    std::string line;
     while (true) {
-        cout << "> ";
-        cout.flush();
-        if (!getline(cin, line)) throw EOFExit();
-        if (line == ".") break;
+        std::cout << "> ";
+        std::cout.flush();
+        if (!std::getline(std::cin, line)) throw EOFExit();
+        if (line == "QED") break;
         lines.push_back(line);
     }
     return lines;
@@ -614,7 +615,6 @@ static std::string preview_for_frame(const Parts &acc, const Frame &f) {
     return std::string("(open block)");
 }
 
-
 // Replaces previous append_parts_with_nesting with corrected header-matching, previewing, indentation,
 // insert_pos bookkeeping and "try next older" flow.
 static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, const std::string &kw) {
@@ -625,7 +625,6 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
         for (int fi = static_cast<int>(ctx.control_stack.size()) - 1; fi >= 0; --fi) {
             const Frame &frame = ctx.control_stack[fi];
             std::string preview = preview_for_frame(acc, frame);
-
             std::string q = "Insert snippet for '" + kw + "' inside open block: " + preview + " ? (y/n)";
             std::string resp = ask(q, "y");
             if (!resp.empty() && (resp[0] == 'y' || resp[0] == 'Y')) {
@@ -637,7 +636,7 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
                 size_t pos = frame.insert_pos;
                 if (pos > acc.body.size()) pos = acc.body.size();
 
-                // find the header corresponding to this frame (robust to intervening inserted blocks)
+                // find the header corresponding to this frame
                 size_t header_idx = find_unclosed_header_index(acc, pos);
                 std::string header_ws = (header_idx == std::string::npos) ? std::string() : leading_ws_of(acc.body[header_idx]);
 
@@ -672,23 +671,25 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
                     // insert at pos
                     acc.body.insert(acc.body.begin() + pos, to_insert.begin(), to_insert.end());
 
-                    // update insert_pos for all frames >= pos
+                    // update insert_pos for all frames whose insert_pos >= pos
+                    size_t inserted_count = to_insert.size();
                     for (size_t fj = 0; fj < ctx.control_stack.size(); ++fj) {
-                        if (ctx.control_stack[fj].insert_pos >= pos) ctx.control_stack[fj].insert_pos += to_insert.size();
+                        if (ctx.control_stack[fj].insert_pos >= pos) ctx.control_stack[fj].insert_pos += inserted_count;
                     }
 
                     // ask whether to keep the newly-inserted block open
-                    std::string keep = ask("Detected control block header for '" + kw + "'. Keep this block open for nested inserts? (y/n)", "y");
+                    std::string keep = ask("Detected control block header for '" + kw + "'.\nKeep this block open for nested inserts? (y/n)", "y");
                     if (!keep.empty() && (keep[0] == 'y' || keep[0] == 'Y')) {
-                        // push new frame: insert_pos immediately after header + initial inner lines
+                        // push new frame: insert_pos immediately after the header + any initial inner lines
                         Frame nf;
-                        nf.parts.body.clear(); // initial inner already inserted
-                        nf.insert_pos = pos + 1 + inner.size();
+                        // The new insert position should be at the end of the inserted chunk (i.e. pos + inserted_count)
+                        nf.parts.body.clear();
+                        nf.insert_pos = pos + inserted_count;
                         ctx.control_stack.push_back(std::move(nf));
                         return;
                     } else {
                         // not keeping open -> ensure closing brace present aligned with header_indent
-                        size_t close_pos = pos + 1 + inner.size();
+                        size_t close_pos = pos + inserted_count; // after inserted lines
                         if (!had_closing) {
                             if (close_pos > acc.body.size()) close_pos = acc.body.size();
                             bool has_closing = false;
@@ -697,9 +698,10 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
                                 if (!t.empty() && t == "}") has_closing = true;
                             }
                             if (!has_closing) {
-                                acc.body.insert(acc.body.begin() + close_pos, header_indent + "}");
-                                for (size_t fj = 0; fj < ctx.control_stack.size(); ++fj) {
-                                    if (ctx.control_stack[fj].insert_pos >= close_pos) ctx.control_stack[fj].insert_pos += 1;
+                                acc.body.insert(acc.body.begin() + close_pos, header_ws + "}");
+                                // bump insert_pos of earlier frames (older) so their positions remain valid
+                                for (size_t oj = 0; oj < ctx.control_stack.size(); ++oj) {
+                                    if (ctx.control_stack[oj].insert_pos >= close_pos) ctx.control_stack[oj].insert_pos += 1;
                                 }
                             }
                         }
@@ -718,12 +720,14 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
 
                 // Insert and update bookkeeping
                 acc.body.insert(acc.body.begin() + pos, to_insert.begin(), to_insert.end());
+                size_t inserted_count = to_insert.size();
+
                 // update this frame's insert_pos
-                ctx.control_stack[fi].insert_pos += to_insert.size();
+                ctx.control_stack[fi].insert_pos += inserted_count;
                 // bump other frames' insert_pos if necessary
                 for (size_t fj = 0; fj < ctx.control_stack.size(); ++fj) {
                     if (fj == static_cast<size_t>(fi)) continue;
-                    if (ctx.control_stack[fj].insert_pos >= pos) ctx.control_stack[fj].insert_pos += to_insert.size();
+                    if (ctx.control_stack[fj].insert_pos >= pos) ctx.control_stack[fj].insert_pos += inserted_count;
                 }
                 return;
             } // end if user accepted this frame
@@ -738,10 +742,11 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
                 }
             }
             // no older frames: fall through
-        }
-        // fell out: no open frame chosen. Continue with top-level handling.
-    }
+        } // end for frames
+        // fell out: no open frame chosen.
+    } // end if control_stack not empty
 
+    // Continue with top-level handling.
     // 2) No frame chosen (or none existed). Handle opening-block at top-level.
     if (parts_is_opening_block(p)) {
         std::vector<std::string> preceding;
@@ -756,19 +761,17 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
         for (const auto &ln : preceding) acc.body.push_back(trim_leading(ln));
 
         // ask whether to keep open
-        std::string keep = ask("Detected control block header for '" + kw + "'. Keep this block open for nested inserts? (y/n)", "y");
+        std::string keep = ask("Detected control block header for '" + kw + "'.\nKeep this block open for nested inserts? (y/n)", "y");
         if (!keep.empty() && (keep[0] == 'y' || keep[0] == 'Y')) {
             // write header (top-level)
             std::string header_line = trim_leading(header);
             acc.body.push_back(header_line);
-
             // initial inner lines indented one level
             for (const auto &ln : inner) {
                 std::string t = trim_leading(ln);
                 if (t.empty()) acc.body.push_back(std::string());
                 else acc.body.push_back(INDENT + t);
             }
-
             // push frame with insert_pos after header + any initial inner
             Frame f;
             f.parts.body.clear();
@@ -791,7 +794,6 @@ static void append_parts_with_nesting(Parts &acc, const Parts &p, Context &ctx, 
     // 3) Default: append normally to top-level
     append_parts(acc, p);
 }
-
 
 // Replaces previous flush_control_stack: closes frames in LIFO order, aligns braces to the matching header,
 // and updates other frames' insert_pos accordingly.
@@ -1072,10 +1074,68 @@ static Parts handle_switch(Context &ctx, const string &tag) {
 
 static Parts handle_return(Context &ctx, const string &tag) {
     Parts p;
-    string expr = ask("[" + tag + "] Expression to return from main", "0");
-    p.body.push_back("// (" + tag + ") Demonstrate return");
-    p.body.push_back("cout << \"About to return: \" << (" + expr + ") << endl;");
-    p.body.push_back("return " + expr + ";");
+
+    // Disallow at top-level (no open control frames).
+    if (ctx.control_stack.empty()) {
+        p.body.push_back("// (" + tag + ") ERROR: 'return' is disallowed at top-level.");
+        p.body.push_back("// Allowed only inside an if/else, a loop (for/while/do), switch/case, try or catch block.");
+        return p;
+    }
+
+    // Walk innermost -> outer control frames and examine their header lines.
+    bool allowed = true;
+    std::string header;
+    for (int i = static_cast<int>(ctx.control_stack.size()) - 1; i >= 0; --i) {
+        const Parts &fp = ctx.control_stack[i].parts;
+
+        // Reuse repo helper to extract frame header.
+        std::vector<std::string> preceding;
+        std::vector<std::string> inner;
+        bool had_closing = false;
+        extract_block_header_and_inner(fp, preceding, header, inner, had_closing);
+
+        std::string h = trim(header);
+        if (h.empty()) continue;
+
+        // Normalize leading non-letters (handles " } else {" previews).
+        size_t pos = 0;
+        while (pos < h.size() && !std::isalpha(static_cast<unsigned char>(h[pos]))) ++pos;
+        std::string h2 = (pos < h.size()) ? h.substr(pos) : h;
+
+        // Allow only these constructs (checking start).
+        if (h2.rfind("if", 0) == 0 ||
+            h2.rfind("else", 0) == 0 ||
+            h2.rfind("for", 0) == 0 ||
+            h2.rfind("while", 0) == 0 ||
+            h2.rfind("do", 0) == 0 ||
+            h2.rfind("switch", 0) == 0 ||
+            h2.rfind("case ", 0) == 0 ||
+            h2.rfind("try", 0) == 0 ||
+            h2.rfind("catch", 0) == 0) {
+            allowed = false;
+            break;
+        }
+    }
+
+    if (!allowed) {
+        p.body.push_back("// (" + tag + ") ERROR: 'return' not inside an allowed construct.");
+        p.body.push_back("// Allowed only inside an if/else, a loop (for/while/do), switch/case, try or catch block.");
+    } else {
+        // Allowed — prompt ONCE for optional return expression.
+        std::string expr = ask("[" + tag + "] Return expression (leave empty for a bare 'return;')", "");
+
+        // Normalize: trim and drop a trailing semicolon if present.
+        if (!expr.empty()) {
+            expr = trim(expr);
+            if (!expr.empty() && expr.back() == ';') expr.pop_back();
+            expr = trim(expr);
+        }
+
+        p.body.push_back("// (" + tag + ") Inserted return");
+        if (expr.empty()) p.body.push_back("return;");
+        else p.body.push_back("return " + expr + ";");
+    }
+
     return p;
 }
 
@@ -2078,90 +2138,385 @@ static Parts handle_volatile(Context &ctx, const string &tag) {
     return p;
 }
 
+// --- Helper: parse param list entered as "name=default, other=val" into vector<pair>
+static std::vector<std::pair<std::string,std::string>> parse_param_list(const std::string &in) {
+    std::vector<std::pair<std::string,std::string>> out;
+    std::string cur;
+    size_t i = 0, n = in.size();
+    while (i < n) {
+        // collect until comma
+        cur.clear();
+        while (i < n && in[i] != ',') {
+            cur.push_back(in[i]);
+            i++;
+        }
+        // skip comma
+        if (i < n && in[i] == ',') i++;
+        // trim spaces
+        auto trim = [](std::string &st) {
+            size_t b = 0; while (b < st.size() && isspace((unsigned char)st[b])) b++;
+            size_t e = st.size();
+            while (e>b && isspace((unsigned char)st[e-1])) e--;
+            st = st.substr(b, e-b);
+        };
+        trim(cur);
+        if (cur.empty()) continue;
+        size_t eq = cur.find('=');
+        if (eq == std::string::npos) {
+            out.emplace_back(cur, std::string{});
+        } else {
+            std::string name = cur.substr(0, eq);
+            std::string def  = cur.substr(eq+1);
+            trim(name); trim(def);
+            out.emplace_back(name, def);
+        }
+    }
+    return out;
+}
+
 // -------------------- Dispatcher per occurrence, updated to support user keywords with params ------
 
-static Parts generate_parts_for_keyword_occurrence(const string &kw,
+// NOTE: this variant:
+//  - preserves exact token order across lines,
+//  - ignores tokens inside quotes/comments,
+//  - substitutes nested bodies inline at the token position,
+//  - prompts to define previously-undefined unquoted tokens (one prompt per unique token per top-level expansion),
+//  - detects recursion and avoids cycles.
+// Uses UserKeywordMap (alias to unordered_map) for user_keywords.
+static Parts generate_parts_for_keyword_occurrence(const std::string &kw,
                                                    Context &ctx,
                                                    int occurrence_index,
                                                    int token_pos_in_input,
-                                                   const UserKeywordMap &user_keywords) {
-    ostringstream t;
+                                                   UserKeywordMap &user_keywords,
+                                                   std::unordered_set<std::string> *active = nullptr) {
+    std::ostringstream t;
     t << "occurrence " << occurrence_index << " (token " << token_pos_in_input << ")";
-    string tag = t.str();
+    std::string tag = t.str();
 
-    // If it's a user-defined keyword, prompt for parameter values and substitute.
+    // Prepare active recursion tracking set
+    std::unordered_set<std::string> local_active;
+    std::unordered_set<std::string> *active_ptr = active ? active : &local_active;
+
+    // Cycle detection
+    if (active_ptr->count(kw)) {
+        std::cout << "[" << tag << "] Detected recursive keyword reference for '" << kw
+                  << "'. Skipping nested expansion to avoid infinite recursion.\n";
+        return handle_generic_with_body(ctx, kw, tag);
+    }
+    active_ptr->insert(kw);
+
+    // 1) If user-defined: ask for its parameters and generate its raw parts (placeholders substituted)
     auto uit = user_keywords.find(kw);
+    Parts p;
     if (uit != user_keywords.end()) {
         const UserKeyword &uk = uit->second;
-        // collect parameter values
-        map<string,string> values;
+        std::map<std::string,std::string> values;
         for (const auto &pp : uk.params) {
-            const string &pname = pp.first;
-            const string &pdef = pp.second;
-            string val = ask("[" + tag + "] Value for parameter '" + pname + "'", pdef);
+            const std::string &pname = pp.first;
+            const std::string &pdef  = pp.second;
+            std::string val = ask("[" + tag + "] Value for parameter '" + pname + "'", pdef);
             values[pname] = val;
         }
-        return parts_from_user_snippet_with_params(uk, values, tag);
+        p = parts_from_user_snippet_with_params(uk, values, tag);
     }
 
-    // built-in keyword routing (unchanged + additional handlers)
-    if (kw == "int" || kw == "double" || kw == "float" || kw == "char" ||
-        kw == "long" || kw == "short" || kw == "signed" || kw == "unsigned" ||
-        kw == "bool" || kw == "wchar_t" || kw == "char16_t" || kw == "char32_t")
-        return handle_type_like(ctx, kw, tag);
-    if (kw == "auto") return handle_auto(ctx, tag);
-    if (kw == "if" || kw == "else") return handle_if_else(ctx, tag);
-    if (kw == "for") return handle_for(ctx, tag);
-    if (kw == "while") return handle_while(ctx, tag);
-    if (kw == "do") return handle_do(ctx, tag);
-    if (kw == "switch" || kw == "case") return handle_switch(ctx, tag);
-    if (kw == "return") return handle_return(ctx, tag);
-    if (kw == "class" || kw == "struct" || kw == "union") return handle_class_struct_union(ctx, kw, tag);
-    if (kw == "enum") return handle_enum(ctx, tag);
-    if (kw == "template") return handle_template(ctx, tag);
-    if (kw == "static_cast" || kw == "dynamic_cast" || kw == "const_cast" || kw == "reinterpret_cast")
-        return handle_cast(ctx, kw, tag);
-    if (kw == "new" || kw == "delete") return handle_new_delete(ctx, tag);
-    if (kw == "operator") return handle_operator_keyword(ctx, tag);
-    if (kw == "try" || kw == "catch" || kw == "throw") return handle_try_catch_throw(ctx, tag);
-    if (kw == "constexpr") return handle_constexpr(ctx, tag);
-    if (kw == "static_assert") return handle_static_assert(ctx, tag);
-    if (kw == "alignas" || kw == "alignof") return handle_alignas_alignof(ctx, tag);
-    if (kw == "thread_local") return handle_thread_local(ctx, tag);
-    if (kw == "mutable") return handle_mutable(ctx, tag);
-    if (kw == "sizeof" || kw == "typeid") return handle_sizeof_typeid(ctx, tag);
-    if (kw == "and" || kw == "or" || kw == "not" || kw == "xor" || kw == "bitand" || kw == "bitor" || kw == "compl" || kw == "not_eq" || kw == "and_eq" || kw == "or_eq" || kw == "xor_eq")
-        return handle_alternative_tokens(ctx, kw, tag);
+    // If not user-defined, handle builtins
+    if (uit == user_keywords.end()) {
+        // handle built-in keywords (same as previous function) — keep exhaustive list
+        const std::string k = kw;
+        if (k == "int" || k == "double" || k == "float" || k == "char" ||
+            k == "long" || k == "short" || k == "signed" || k == "unsigned" ||
+            k == "bool" || k == "wchar_t" || k == "char16_t" || k == "char32_t")
+            { active_ptr->erase(kw); return handle_type_like(ctx, k, tag); }
+        if (k == "auto") { active_ptr->erase(kw); return handle_auto(ctx, tag); }
+        if (k == "if" || k == "else") { active_ptr->erase(kw); return handle_if_else(ctx, tag); }
+        if (k == "for") { active_ptr->erase(kw); return handle_for(ctx, tag); }
+        if (k == "while") { active_ptr->erase(kw); return handle_while(ctx, tag); }
+        if (k == "do") { active_ptr->erase(kw); return handle_do(ctx, tag); }
+        if (k == "switch" || k == "case") { active_ptr->erase(kw); return handle_switch(ctx, tag); }
+        if (k == "return") { active_ptr->erase(kw); return handle_return(ctx, tag); }
+        if (k == "class" || k == "struct" || k == "union") { active_ptr->erase(kw); return handle_class_struct_union(ctx, k, tag); }
+        if (k == "enum") { active_ptr->erase(kw); return handle_enum(ctx, tag); }
+        if (k == "template") { active_ptr->erase(kw); return handle_template(ctx, tag); }
+        if (k == "static_cast" || k == "dynamic_cast" || k == "const_cast" || k == "reinterpret_cast") { active_ptr->erase(kw); return handle_cast(ctx, k, tag); }
+        if (k == "new" || k == "delete") { active_ptr->erase(kw); return handle_new_delete(ctx, tag); }
+        if (k == "operator") { active_ptr->erase(kw); return handle_operator_keyword(ctx, tag); }
+        if (k == "try" || k == "catch" || k == "throw") { active_ptr->erase(kw); return handle_try_catch_throw(ctx, tag); }
+        if (k == "constexpr") { active_ptr->erase(kw); return handle_constexpr(ctx, tag); }
+        if (k == "static_assert") { active_ptr->erase(kw); return handle_static_assert(ctx, tag); }
+        if (k == "alignas" || k == "alignof") { active_ptr->erase(kw); return handle_alignas_alignof(ctx, tag); }
+        if (k == "thread_local") { active_ptr->erase(kw); return handle_thread_local(ctx, tag); }
+        if (k == "mutable") { active_ptr->erase(kw); return handle_mutable(ctx, tag); }
+        if (k == "sizeof" || k == "typeid") { active_ptr->erase(kw); return handle_sizeof_typeid(ctx, tag); }
+        if (k == "and" || k == "or" || k == "not" || k == "xor" ||
+            k == "bitand" || k == "bitor" || k == "compl" || k == "not_eq" || k == "and_eq" || k == "or_eq" || k == "xor_eq")
+            { active_ptr->erase(kw); return handle_alternative_tokens(ctx, k, tag); }
+        if (k == "extern") { active_ptr->erase(kw); return handle_extern(ctx, tag); }
+        if (k == "inline") { active_ptr->erase(kw); return handle_inline(ctx, tag); }
+        if (k == "register") { active_ptr->erase(kw); return handle_register(ctx, tag); }
+        if (k == "asm") { active_ptr->erase(kw); return handle_asm(ctx, tag); }
+        if (k == "goto") { active_ptr->erase(kw); return handle_goto(ctx, tag); }
+        if (k == "export") { active_ptr->erase(kw); return handle_export(ctx, tag); }
+        if (k == "const") { active_ptr->erase(kw); return handle_const(ctx, tag); }
+        if (k == "decltype") { active_ptr->erase(kw); return handle_decltype(ctx, tag); }
+        if (k == "explicit") { active_ptr->erase(kw); return handle_explicit(ctx, tag); }
+        if (k == "true" || kw == "false") { active_ptr->erase(kw); return handle_bool_literal(ctx, kw, tag); }
+        if (k == "friend") { active_ptr->erase(kw); return handle_friend(ctx, tag); }
+        if (k == "break" || k == "continue") { active_ptr->erase(kw); return handle_break_continue(ctx, k, tag); }
+        if (k == "namespace") { active_ptr->erase(kw); return handle_namespace(ctx, tag); }
+        if (k == "noexcept") { active_ptr->erase(kw); return handle_noexcept(ctx, tag); }
+        if (k == "nullptr") { active_ptr->erase(kw); return handle_nullptr(ctx, tag); }
+        if (k == "private" || k == "protected" || k == "public") { active_ptr->erase(kw); return handle_access_specifiers(ctx, k, tag); }
+        if (k == "static") { active_ptr->erase(kw); return handle_static(ctx, tag); }
+        if (k == "this") { active_ptr->erase(kw); return handle_this(ctx, tag); }
+        if (k == "typedef" || k == "typename") { active_ptr->erase(kw); return handle_typedef_typename(ctx, k, tag); }
+        if (k == "using") { active_ptr->erase(kw); return handle_using(ctx, tag); }
+        if (k == "virtual") { active_ptr->erase(kw); return handle_virtual(ctx, tag); }
+        if (k == "void") { active_ptr->erase(kw); return handle_void(ctx, tag); }
+        if (k == "volatile") { active_ptr->erase(kw); return handle_volatile(ctx, tag); }
 
-    // additional standard keyword handlers
-    if (kw == "extern") return handle_extern(ctx, tag);
-    if (kw == "inline") return handle_inline(ctx, tag);
-    if (kw == "register") return handle_register(ctx, tag);
-    if (kw == "asm") return handle_asm(ctx, tag);
-    if (kw == "goto") return handle_goto(ctx, tag);
-    if (kw == "break" || kw == "continue") return handle_break_continue(ctx, kw, tag);
-    if (kw == "export") return handle_export(ctx, tag);
+        // fallback for unknown builtins
+        active_ptr->erase(kw);
+        return handle_generic_with_body(ctx, kw, tag);
+    }
 
-    // newly added keyword handlers
-    if (kw == "const") return handle_const(ctx, tag);
-    if (kw == "decltype") return handle_decltype(ctx, tag);
-    if (kw == "explicit") return handle_explicit(ctx, tag);
-    if (kw == "true" || kw == "false") return handle_bool_literal(ctx, kw, tag);
-    if (kw == "friend") return handle_friend(ctx, tag);
-    if (kw == "namespace") return handle_namespace(ctx, tag);
-    if (kw == "noexcept") return handle_noexcept(ctx, tag);
-    if (kw == "nullptr") return handle_nullptr(ctx, tag);
-    if (kw == "private" || kw == "protected" || kw == "public") return handle_access_specifiers(ctx, kw, tag);
-    if (kw == "static") return handle_static(ctx, tag);
-    if (kw == "this") return handle_this(ctx, tag);
-    if (kw == "typedef" || kw == "typename") return handle_typedef_typename(ctx, kw, tag);
-    if (kw == "using") return handle_using(ctx, tag);
-    if (kw == "virtual") return handle_virtual(ctx, tag);
-    if (kw == "void") return handle_void(ctx, tag);
-    if (kw == "volatile") return handle_volatile(ctx, tag);
+    // At this point: p contains the top-level user-defined snippet (placeholder substituted).
+    // We'll perform inline expansion: iterate original p.body lines left-to-right and replace tokens in-place
+    // with their expansions. We will also prompt to define unknown unquoted tokens.
 
-    // fallback
-    return handle_generic_with_body(ctx, kw, tag);
+    // Keep a set of tokens we already processed (so we only prompt/expand a unique token once per top-level expansion).
+    std::unordered_set<std::string> processed_tokens;
+    // For merging includes while preserving order of discovery:
+    auto append_include_if_new = [&](const std::string &inc) {
+        if (std::find(p.includes.begin(), p.includes.end(), inc) == p.includes.end())
+            p.includes.push_back(inc);
+    };
+
+    // Gather C++ keywords set
+    const auto &kwset = cpp17_keywords();
+
+    // We'll build the new body lines as we go.
+    std::vector<std::string> new_body_lines;
+
+    for (const std::string &orig_line : p.body) {
+        // Start current_lines with one empty working line
+        std::vector<std::string> current_lines(1, std::string{});
+
+        // Tokenization that preserves text segments: we need to iterate the line and split into
+        // "non-token text" and "token" segments while ignoring quoted/comment tokens.
+        size_t i = 0, n = orig_line.size();
+        bool in_single = false, in_double = false, in_block = false;
+        std::string seg; // segment builder for non-token text
+        while (i < n) {
+            // detect block comments (won't span multiple original lines here because orig_line is one line)
+            if (!in_single && !in_double) {
+                if (!in_block && i+1 < n && orig_line[i] == '/' && orig_line[i+1] == '*') {
+                    in_block = true; seg.push_back(orig_line[i]); i++; seg.push_back(orig_line[i]); i++; continue;
+                } else if (in_block && i+1 < n && orig_line[i]=='*' && orig_line[i+1]=='/') {
+                    in_block = false; seg.push_back(orig_line[i]); i++; seg.push_back(orig_line[i]); i++; continue;
+                }
+            }
+            if (in_block) { seg.push_back(orig_line[i]); i++; continue; }
+
+            // line comment
+            if (!in_single && !in_double && i + 1 < n && orig_line[i] == '/' && orig_line[i+1] == '/') {
+                // rest of line is comment: append remainder as text segment and break
+                seg.append(orig_line.substr(i));
+                i = n;
+                break;
+            }
+
+            // quotes
+            if (!in_single && orig_line[i] == '"') { in_double = !in_double; seg.push_back(orig_line[i]); i++; continue; }
+            if (!in_double && orig_line[i] == '\'') { in_single = !in_single; seg.push_back(orig_line[i]); i++; continue; }
+
+            // When inside quotes, treat everything as text (don't detect tokens)
+            if (in_single || in_double) {
+                // handle escape
+                if (orig_line[i] == '\\' && i + 1 < n) {
+                    seg.push_back(orig_line[i]); i++; seg.push_back(orig_line[i]); i++; continue;
+                } else {
+                    seg.push_back(orig_line[i]); i++; continue;
+                }
+            }
+
+            // Outside quotes/comments: detect token start
+            char c = orig_line[i];
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || (c >= '0' && c <= '9')) {
+                // flush current text segment to current_lines
+                if (!seg.empty()) {
+                    for (auto &ln : current_lines) ln += seg;
+                    seg.clear();
+                }
+                // collect token
+                std::string token;
+                while (i < n) {
+                    char d = orig_line[i];
+                    if ((d >= 'A' && d <= 'Z') || (d >= 'a' && d <= 'z') || d == '_' || (d >= '0' && d <= '9')) {
+                        token.push_back(d); i++;
+                    } else break;
+                }
+                std::string norm = normalize_token(token);
+                if (norm.empty()) continue;
+
+                // If we've already processed this token earlier in this top-level call, reuse its expansion (no new prompt)
+                if (processed_tokens.count(norm)) {
+                    // If it's known user keyword or known built-in, we need to get its expanded parts:
+                    Parts nested;
+                    if (user_keywords.find(norm) != user_keywords.end()) {
+                        nested = generate_parts_for_keyword_occurrence(norm, ctx, 0, 0, user_keywords, active_ptr);
+                    } else if (kwset.find(norm) != kwset.end()) {
+                        // built-in; call handler once
+                        nested = generate_parts_for_keyword_occurrence(norm, ctx, 0, 0, user_keywords, active_ptr);
+                    } else {
+                        // unknown but previously declined or otherwise skipped -> append raw token
+                        for (auto &ln : current_lines) ln += token;
+                        continue;
+                    }
+                    // Merge includes (in discovery order)
+                    for (const auto &inc : nested.includes) append_include_if_new(inc);
+                    // Inline-append nested.body into current_lines
+                    if (!nested.body.empty()) {
+                        // append first nested line to every current working line, push remainder as extra lines
+                        for (auto &ln : current_lines) ln += nested.body[0];
+                        for (size_t bi = 1; bi < nested.body.size(); ++bi) new_body_lines.push_back(nested.body[bi]);
+                        // if there were multiple current_lines, coalesce them before continuing
+                        if (!new_body_lines.empty()) {
+                            // prepend existing current_lines content into new_body_lines front if needed
+                            // flush current_lines aggregated into new_body_lines
+                            for (auto &cl : current_lines) {
+                                new_body_lines.insert(new_body_lines.begin(), cl);
+                            }
+                            // reset current_lines to a single empty line to continue
+                            current_lines.clear();
+                            current_lines.emplace_back("");
+                        }
+                    } else {
+                        // nothing to insert, keep token text
+                        for (auto &ln : current_lines) ln += token;
+                    }
+                    continue;
+                }
+
+                // If token is a known user keyword or a C++ keyword -> expand (this may prompt)
+                if (user_keywords.find(norm) != user_keywords.end() || kwset.find(norm) != kwset.end()) {
+                    std::cout << "[" << tag << "] Nested token detected in snippet: '" << norm << "'.\n";
+                    Parts nested = generate_parts_for_keyword_occurrence(norm, ctx, 0, 0, user_keywords, active_ptr);
+                    // Merge includes
+                    for (const auto &inc : nested.includes) append_include_if_new(inc);
+                    // Inline-append nested.body into current_lines
+                    if (!nested.body.empty()) {
+                        for (auto &ln : current_lines) ln += nested.body[0];
+                        for (size_t bi = 1; bi < nested.body.size(); ++bi) {
+                            new_body_lines.push_back(nested.body[bi]);
+                        }
+                        if (!new_body_lines.empty()) {
+                            for (auto &cl : current_lines) {
+                                new_body_lines.insert(new_body_lines.begin(), cl);
+                            }
+                            current_lines.clear();
+                            current_lines.emplace_back("");
+                        }
+                    }
+                    processed_tokens.insert(norm);
+                    continue;
+                }
+
+                // Unknown unquoted token: prompt user whether to create a definition now
+                {
+                    std::string q = "[" + tag + "] Token '" + token + "' is used in snippet but not defined. Define it now? (y/N)";
+                    std::string resp = ask(q, "n");
+                    if (!resp.empty() && (resp == "y" || resp == "Y" || resp == "yes" || resp == "Yes")) {
+                        // Ask for param list (comma-separated "name=default" pairs)
+                        std::string params_raw = ask("Enter parameters (format: name=default,other=val) or leave blank for none", "");
+                        auto parsed = parse_param_list(params_raw);
+
+                        // Ask for a multi-line snippet: user finishes by typing 'QED' on its own line.
+                        std::vector<std::string> lines;
+                        try {
+                            lines = read_multiline_body("Enter the snippet for '" + token + "'. Finish with a single 'QED' on its own line:");
+                        } catch (const EOFExit &) {
+                            std::cout << "[" << tag << "] EOF while reading snippet — aborting new-definition flow for '" << token << "'.\n";
+                            // leave token verbatim and mark processed to avoid repeated asking
+                            for (auto &ln : current_lines) ln += token;
+                            processed_tokens.insert(norm);
+                            continue;
+                        }
+
+                        // Join lines into multi-line snippet representation expected by your UserKeyword structure.
+                        // If your UserKeyword stores snippet as a single string with embedded newlines:
+                        std::string snippet_joined;
+                        for (size_t li = 0; li < lines.size(); ++li) {
+                            snippet_joined += lines[li];
+                            if (li + 1 < lines.size()) snippet_joined += "\n";
+                        }
+
+                        // Build UserKeyword entry and insert into user_keywords
+                        UserKeyword newuk;
+                        newuk.snippet = snippet_joined;
+                        newuk.params = parsed;
+                        user_keywords[norm] = newuk;
+
+                        // Persist immediately so future top-level expansions (or program runs) will not prompt again
+                        if (!save_user_keywords(user_keywords)) {
+                            std::cout << "[" << tag << "] Warning: failed to save new user keyword '" << token << "' to disk.\n";
+                        }
+
+                        // Now expand it (this will prompt for its params)
+                        Parts nested = generate_parts_for_keyword_occurrence(norm, ctx, 0, 0, user_keywords, active_ptr);
+
+                        // Merge includes
+                        for (const auto &inc : nested.includes) append_include_if_new(inc);
+                        // Inline-append nested.body into current_lines
+                        if (!nested.body.empty()) {
+                            for (auto &ln : current_lines) ln += nested.body[0];
+                            for (size_t bi = 1; bi < nested.body.size(); ++bi) {
+                                new_body_lines.push_back(nested.body[bi]);
+                            }
+                            if (!new_body_lines.empty()) {
+                                for (auto &cl : current_lines) {
+                                    new_body_lines.insert(new_body_lines.begin(), cl);
+                                }
+                                current_lines.clear();
+                                current_lines.emplace_back("");
+                            }
+                        }
+                        processed_tokens.insert(norm);
+                        continue;
+                    } else {
+                        // user declined: leave token verbatim
+                        for (auto &ln : current_lines) ln += token;
+                        processed_tokens.insert(norm); // avoid asking again
+                        continue;
+                    }
+                }
+            } else {
+                // normal non-token char: collect to seg
+                seg.push_back(orig_line[i]);
+                i++;
+            }
+        } // end while for characters in line
+
+        // flush any remaining seg text into current_lines
+        if (!seg.empty()) {
+            for (auto &ln : current_lines) ln += seg;
+            seg.clear();
+        }
+
+        // finished processing this original line; commit current_lines and any new_body_lines into new_body_lines
+        // If there is content in current_lines, append them to new_body_lines in order
+        for (auto &ln : current_lines) new_body_lines.push_back(ln);
+        // Note: new_body_lines already accumulated any extra nested lines inserted mid-line.
+
+    } // end for each original p.body line
+
+    // Final merged includes already inserted into p.includes; replace p.body with new_body_lines
+    p.body = std::move(new_body_lines);
+
+    // Unmark current keyword as active
+    active_ptr->erase(kw);
+
+    return p;
 }
 
 // -------------------- Tokenization --------------------
@@ -2242,7 +2597,7 @@ int main() {
                         }
                     }
                     cout << "Paste the snippet that demonstrates this custom keyword. You may use placeholders {name}.\n";
-                    vector<string> snippet_lines = read_multiline_body("End with a single '.' line:");
+                    vector<string> snippet_lines = read_multiline_body("End with a single 'QED' on new line:");
                     std::ostringstream ss;
                     for (auto &l : snippet_lines) ss << l << "\n";
                     UserKeyword uk;
@@ -2460,7 +2815,7 @@ int main() {
                                 }
                             }
                             cout << "Paste the snippet that demonstrates this custom keyword. You may use placeholders {name}.\n";
-                            vector<string> snippet_lines = read_multiline_body("End with a single '.' line:");
+                            vector<string> snippet_lines = read_multiline_body("End with a single 'QED' on new line:");
                             std::ostringstream ss;
                             for (auto &l : snippet_lines) ss << l << "\n";
                             UserKeyword uk;
